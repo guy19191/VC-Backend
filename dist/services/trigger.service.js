@@ -128,6 +128,9 @@ class TriggerService {
     async emitTriggerMatch(trigger, entity) {
         try {
             const triggerData = trigger.toObject();
+            // Prevent re-processing if already matched
+            if (triggerData.status === 'matched')
+                return;
             // Update trigger status
             await this.triggerController.updateTriggerStatus(triggerData._id.toString(), 'matched');
             // Emit WebSocket event
@@ -141,6 +144,7 @@ class TriggerService {
                     vector: undefined
                 }
             });
+            await this.triggerController.callLLMWithMatch(triggerData, entity);
             // Check if trigger has action objects without IDs
             if (!triggerData.actionIds && triggerData.actions && Array.isArray(triggerData.actions)) {
                 const actionIds = [];
@@ -341,8 +345,12 @@ class TriggerService {
     async handleTriggerMatch(trigger, entity) {
         try {
             const triggerData = trigger.toObject();
+            // Prevent re-processing if already matched
+            if (triggerData.status === 'matched')
+                return;
             // Update trigger status
             await this.triggerController.updateTriggerStatus(triggerData._id.toString(), 'matched');
+            await this.triggerController.callLLMWithMatch(triggerData, entity);
             // Execute associated action if exists
             if (triggerData.actionIds && Array.isArray(triggerData.actionIds)) {
                 for (const actionId of triggerData.actionIds) {

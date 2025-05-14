@@ -146,7 +146,8 @@ export class TriggerService {
   private async emitTriggerMatch(trigger: TriggerDocument, entity: Entity): Promise<void> {
     try {
       const triggerData = trigger.toObject();
-      
+      // Prevent re-processing if already matched
+      if (triggerData.status === 'matched') return;
       // Update trigger status
       await this.triggerController.updateTriggerStatus(triggerData._id.toString(), 'matched');
 
@@ -161,7 +162,7 @@ export class TriggerService {
           vector: undefined
         }
       });
-
+      await this.triggerController.callLLMWithMatch(triggerData, entity);
       // Check if trigger has action objects without IDs
       if (!triggerData.actionIds && triggerData.actions && Array.isArray(triggerData.actions)) {
         const actionIds: string[] = [];
@@ -401,10 +402,11 @@ export class TriggerService {
   private async handleTriggerMatch(trigger: TriggerDocument, entity: Entity): Promise<void> {
     try {
       const triggerData = trigger.toObject();
-      
+      // Prevent re-processing if already matched
+      if (triggerData.status === 'matched') return;
       // Update trigger status
       await this.triggerController.updateTriggerStatus(triggerData._id.toString(), 'matched');
-
+      await this.triggerController.callLLMWithMatch(triggerData, entity);
       // Execute associated action if exists
       if (triggerData.actionIds && Array.isArray(triggerData.actionIds)) {
         for (const actionId of triggerData.actionIds) {

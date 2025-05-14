@@ -5,6 +5,7 @@ const entity_model_1 = require("../models/entity.model");
 const trigger_model_1 = require("../models/trigger.model");
 const js_client_rest_1 = require("@qdrant/js-client-rest");
 const uuid_1 = require("uuid");
+const openai_1 = require("../utils/openai");
 class EntityController {
     constructor(triggerService, wsService) {
         this.qdrantClient = new js_client_rest_1.QdrantClient({
@@ -19,7 +20,7 @@ class EntityController {
             // Create entities collection if it doesn't exist
             await this.qdrantClient.createCollection('entities', {
                 vectors: {
-                    size: 128,
+                    size: 1536,
                     distance: 'Cosine'
                 }
             });
@@ -32,7 +33,24 @@ class EntityController {
     setTriggerService(triggerService) {
         this.triggerService = triggerService;
     }
-    async upsertToQdrant(id, entity, vector, metadata) {
+    async ensureQdrantCollection(collectionName, vectorSize) {
+        // Check if collection exists, create if not
+        const collections = await this.qdrantClient.getCollections();
+        const exists = collections.collections.some(c => c.name === collectionName);
+        if (!exists) {
+            await this.qdrantClient.createCollection(collectionName, {
+                vectors: {
+                    size: vectorSize,
+                    distance: 'Cosine'
+                }
+            });
+        }
+    }
+    async generateVector(entity, updates, embeddingModel = 'text-embedding-ada-002') {
+        // Pass both original and updates to the OpenAI utility, with model
+        return await (0, openai_1.generateVectorAndMetadata)(entity, updates);
+    }
+    async upsertToQdrant(id, entity, vector, metadata, collectionName = 'entities') {
         try {
             const point = {
                 id,
@@ -40,7 +58,7 @@ class EntityController {
                 payload: entity,
                 metadata: metadata
             };
-            await this.qdrantClient.upsert('entities', {
+            await this.qdrantClient.upsert(collectionName, {
                 points: [point]
             });
         }
@@ -49,15 +67,14 @@ class EntityController {
             throw new Error('Failed to upsert entity to Qdrant');
         }
     }
-    async createEntity(entity, processEntity = true) {
+    async createEntity(entity, processEntity = true, embeddingModel = 'text-embedding-ada-002', collectionName = 'entities') {
         try {
             const source = entity.source || 'both';
-            // Add id and timestamps to the entity
             entity._id = (0, uuid_1.v4)();
             entity.createdAt = new Date();
             entity.updatedAt = new Date();
             // Generate vector and metadata
-            const { vector, metadata } = await this.generateVector(entity);
+            const { vector, metadata } = await this.generateVector(entity, undefined, embeddingModel);
             entity.vector = vector;
             entity.metadata = metadata;
             if (source === 'mongodb' || source === 'both') {
@@ -68,13 +85,12 @@ class EntityController {
                 await mongoEntity.save();
             }
             if (source === 'qdrant' || source === 'both') {
-                await this.upsertToQdrant(entity._id, entity, vector, metadata);
+                // Ensure Qdrant collection matches OpenAI vector size
+                await this.upsertToQdrant(entity._id, entity, vector, metadata, collectionName);
             }
-            // Process entity for trigger matching
             if (this.triggerService && processEntity) {
                 await this.triggerService.processEntity(entity);
             }
-            // Emit WebSocket event for entity creation
             this.wsService.emit('entityCreated', entity);
             return entity;
         }
@@ -615,23 +631,6 @@ class EntityController {
             console.error('Error updating entities by query:', error);
             res.status(500).json({ error: 'Failed to update entities by query' });
         }
-    }
-    // TODO: Replace with actual LLM API integration
-    async generateVector(entity, updates) {
-        // Merge entity with updates if provided
-        const dataToVectorize = updates ? { ...entity, ...updates } : entity;
-        // Placeholder for LLM vector generation and metadata
-        // This will be replaced with actual API call to LLM service
-        const vector = Array(128).fill(0).map(() => Math.random());
-        // Normalize the vector
-        const magnitude = Math.sqrt(vector.reduce((sum, val) => sum + val * val, 0));
-        const normalizedVector = vector.map(val => val / magnitude);
-        // Generate metadata text from entity data
-        const metadata = `Entity type: ${dataToVectorize.type}, Properties: ${JSON.stringify(dataToVectorize.properties || {})}, Position: ${JSON.stringify(dataToVectorize.position || {})}`;
-        return {
-            vector: normalizedVector,
-            metadata
-        };
     }
 }
 exports.EntityController = EntityController;

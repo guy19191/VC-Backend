@@ -17,6 +17,7 @@ import mongoose from 'mongoose';
 import { v4 as uuidv4 } from 'uuid';
 import { GeoRuleTriggerModel, LayerTriggerModel, TimeOutTriggerModel } from '../models/trigger.model';
 import { WebSocketService } from '../websocket';
+import { generateVectorAndMetadata } from '../utils/openai';
 
 export class EntityController {
   private qdrantClient: QdrantClient;
@@ -37,7 +38,7 @@ export class EntityController {
       // Create entities collection if it doesn't exist
       await this.qdrantClient.createCollection('entities', {
         vectors: {
-          size: 128,
+          size: 1536,
           distance: 'Cosine'
         }
       });
@@ -51,7 +52,36 @@ export class EntityController {
     this.triggerService = triggerService;
   }
 
-  private async upsertToQdrant(id: string, entity: Entity, vector: number[], metadata: string) {
+  private async ensureQdrantCollection(collectionName: string, vectorSize: number) {
+    // Check if collection exists, create if not
+    const collections = await this.qdrantClient.getCollections();
+    const exists = collections.collections.some(c => c.name === collectionName);
+    if (!exists) {
+      await this.qdrantClient.createCollection(collectionName, {
+        vectors: {
+          size: vectorSize,
+          distance: 'Cosine'
+        }
+      });
+    }
+  }
+
+  private async generateVector(
+    entity: Omit<Entity, 'id'> | Omit<Trigger, 'id'>,
+    updates?: Partial<Entity> | Partial<Trigger>,
+    embeddingModel: string = 'text-embedding-ada-002'
+  ): Promise<{ vector: number[]; metadata: string }> {
+    // Pass both original and updates to the OpenAI utility, with model
+    return await generateVectorAndMetadata(entity, updates);
+  }
+
+  private async upsertToQdrant(
+    id: string,
+    entity: Entity,
+    vector: number[],
+    metadata: string,
+    collectionName: string = 'entities'
+  ) {
     try {
       const point = {
         id,
@@ -59,8 +89,7 @@ export class EntityController {
         payload: entity,
         metadata: metadata
       };
-
-      await this.qdrantClient.upsert('entities', {
+      await this.qdrantClient.upsert(collectionName, {
         points: [point]
       });
     } catch (error) {
@@ -69,16 +98,15 @@ export class EntityController {
     }
   }
 
-  async createEntity(entity: Entity, processEntity: boolean = true) {
+  async createEntity(entity: Entity, processEntity: boolean = true, embeddingModel: string = 'text-embedding-ada-002', collectionName: string = 'entities') {
     try {
       const source: DatabaseSource = entity.source || 'both';
-      // Add id and timestamps to the entity
       entity._id = uuidv4();
       entity.createdAt = new Date();
       entity.updatedAt = new Date();
 
       // Generate vector and metadata
-      const { vector, metadata } = await this.generateVector(entity);
+      const { vector, metadata } = await this.generateVector(entity, undefined, embeddingModel);
       entity.vector = vector;
       entity.metadata = metadata;
 
@@ -91,15 +119,14 @@ export class EntityController {
       }
 
       if (source === 'qdrant' || source === 'both') {
-        await this.upsertToQdrant(entity._id, entity, vector, metadata);
+        // Ensure Qdrant collection matches OpenAI vector size
+        await this.upsertToQdrant(entity._id, entity, vector, metadata, collectionName);
       }
 
-      // Process entity for trigger matching
       if (this.triggerService && processEntity) {
         await this.triggerService.processEntity(entity);
       }
 
-      // Emit WebSocket event for entity creation
       this.wsService.emit('entityCreated', entity);
       return entity;
     } catch (error) {
@@ -745,29 +772,5 @@ export class EntityController {
       console.error('Error updating entities by query:', error);
       res.status(500).json({ error: 'Failed to update entities by query' });
     }
-  }
-
-  // TODO: Replace with actual LLM API integration
-  private async generateVector(
-    entity: Omit<Entity, 'id'> | Omit<Trigger, 'id'>,
-    updates?: Partial<Entity> | Partial<Trigger>
-  ): Promise<{ vector: number[]; metadata: string }> {
-    // Merge entity with updates if provided
-    const dataToVectorize = updates ? { ...entity, ...updates } : entity;
-    
-    // Placeholder for LLM vector generation and metadata
-    // This will be replaced with actual API call to LLM service
-    const vector = Array(128).fill(0).map(() => Math.random());
-    // Normalize the vector
-    const magnitude = Math.sqrt(vector.reduce((sum, val) => sum + val * val, 0));
-    const normalizedVector = vector.map(val => val / magnitude);
-
-    // Generate metadata text from entity data
-    const metadata = `Entity type: ${dataToVectorize.type}, Properties: ${JSON.stringify((dataToVectorize as Entity).properties || {})}, Position: ${JSON.stringify((dataToVectorize as Entity).position || {})}`;
-
-    return {
-      vector: normalizedVector,
-      metadata
-    };
   }
 } 

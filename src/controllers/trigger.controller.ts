@@ -1,4 +1,6 @@
 import { Request, Response } from 'express';
+import { Client } from "@langchain/langgraph-sdk";
+
 import { TriggerModel } from '../models/trigger.model';
 import { 
   Trigger, 
@@ -17,12 +19,17 @@ import axios from 'axios';
 export class TriggerController {
   private qdrantClient: QdrantClient;
   private wsService: WebSocketService;
+  private llmClient: any;
+
 
   constructor(wsService: WebSocketService) {
     this.qdrantClient = new QdrantClient({
       url: process.env.QDRANT_URL || 'http://localhost:6333'
     });
     this.wsService = wsService;
+    this.llmClient = new Client({apiUrl: process.env.LANGCHAIN_ENDPOINT});
+
+
   }
 
   async addTrigger(req: Request, res: Response) {
@@ -185,7 +192,9 @@ export class TriggerController {
     try {
       // Map status to valid Trigger.status values
       let triggerStatus: 'active' | 'inactive' = 'inactive';
-      if (status === 'active') triggerStatus = 'active';
+      if (status === 'active') {
+        triggerStatus = 'active';
+      }
       // Add a separate matchStatus property for business logic
       const updates: any = {
         status: triggerStatus,
@@ -229,7 +238,6 @@ export class TriggerController {
           status,
           validity: updates.validity
         });
-
         return updatedTrigger;
       }
     } catch (error) {
@@ -279,14 +287,30 @@ export class TriggerController {
   /**
    * Send the matched trigger and entity to the LLM API
    */
-  private async callLLMWithMatch(trigger: Trigger, entity: Entity) {
-    const llmApiUrl = process.env.LLM_API_URL || 'http://localhost:3001/api/llm';
-    try {
-      const response = await axios.post(llmApiUrl, {
-        trigger,
-        entity
-      });
-      return response.data;
+  public async callLLMWithMatch(trigger: Trigger, entity: Entity) {
+    try{
+    // List all assistants
+    const assistants = await this.llmClient.assistants.search({
+      metadata: null,
+      offset: 0,
+      limit: 10,
+    });
+    const agent = assistants.find((a: any) => a.graph_id === 'action');
+
+    // We auto-create an assistant for each graph you register in config.
+    const thread = await this.llmClient.threads.create();
+
+// Start a streaming run
+    const messages = [{ trigger: trigger, entity: entity}];
+
+    const streamResponse = this.llmClient.runs.stream(
+      thread["thread_id"],
+      agent["assistant_id"],
+      {
+        input: { messages },
+      }
+    );
+    this.wsService.emit('chatResponse', streamResponse);
     } catch (error) {
       console.error('Error calling LLM API:', error);
       // Optionally rethrow or handle error
